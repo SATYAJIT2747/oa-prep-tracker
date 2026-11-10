@@ -144,11 +144,13 @@
     return "";
   }
 
-  function cardHTML(q, num) {
-    const r = rec(q.id);
+  // opt.test: render inside a test, using the test's own answer (opt.chosen).
+  function cardHTML(q, num, opt = {}) {
+    const r0 = rec(q.id);
+    const r = opt.test ? { ...r0, a: opt.chosen, show: opt.reveal } : r0;
     const answered = r.a !== undefined;
     const revealed = answered || r.show;
-    const st = cardState(q);
+    const st = opt.test ? (answered ? (r.a === q.a ? "ok" : "bad") : "") : cardState(q);
     const opts = q.o.map((o, i) => {
       let cls = "";
       if (revealed && i === q.a) cls = "correct";
@@ -162,7 +164,8 @@
         : `<span class="verdict">Answer: ${"ABCD"[q.a]}.</span>`;
       explain = `<div class="explain">${verdict} ${q.x || ""}</div>`;
     }
-    return `<article class="card ${r.d ? "is-done" : ""} ${st === "bad" ? "is-wrong" : ""}" id="q-${q.id}" data-id="${q.id}">
+    const doneCls = opt.test ? (st === "ok" ? "is-done" : "") : r.d ? "is-done" : "";
+    return `<article class="card ${doneCls} ${st === "bad" ? "is-wrong" : ""}" id="q-${q.id}" data-id="${q.id}" ${opt.test ? 'data-test="1"' : ""}>
       <div class="card-head">
         ${num ? `<span class="num">${num}.</span>` : ""}
         <span class="chip">${esc(CAT_NAME[q.cat])}</span>
@@ -171,13 +174,13 @@
         <span class="spacer"></span>
         <span class="muted">${esc(q.src)}</span>
         <button class="star ${r.b ? "on" : ""}" data-act="star" title="Bookmark" aria-label="Bookmark">${r.b ? "★" : "☆"}</button>
-        <label class="done-toggle"><input type="checkbox" data-act="done" ${r.d ? "checked" : ""}> Done</label>
+        ${opt.test ? "" : `<label class="done-toggle"><input type="checkbox" data-act="done" ${r.d ? "checked" : ""}> Done</label>`}
       </div>
       <div class="stem">${q.q}</div>
       <div class="opts">${opts}</div>
-      <div class="card-foot">
+      ${opt.test ? "" : `<div class="card-foot">
         ${revealed ? `<button class="linkish" data-act="retry">↺ Try again</button>` : `<button class="linkish" data-act="show">Show answer</button>`}
-      </div>
+      </div>`}
       ${explain}
     </article>`;
   }
@@ -327,10 +330,212 @@
       </section>`;
   }
 
+  // ----------------------------------------------------------------- test
+  const FROM = [["new", "Not done yet"], ["any", "Any question"], ["wrong", "My wrong answers"], ["star", "Bookmarked"]];
+  const cfg = () => (S.testCfg ||= { cats: ["aptitude", "stats"], n: 30, from: "new" });
+
+  function testPool(c) {
+    const cats = new Set(c.cats);
+    return QS.filter((q) => {
+      if (!cats.has(q.cat)) return false;
+      const r = rec(q.id);
+      if (c.from === "new") return !r.d;
+      if (c.from === "wrong") return r.a !== undefined && r.a !== q.a;
+      if (c.from === "star") return !!r.b;
+      return true;
+    });
+  }
+  const shuffled = (arr) => {
+    const a = [...arr];
+    for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
+    return a;
+  };
+  const fmtTime = (ms) => {
+    const s = Math.floor(ms / 1000);
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+    return (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(sec).padStart(2, "0");
+  };
+  const testElapsed = (T) => (T.dur !== undefined ? T.dur : Date.now() - T.start);
+
+  function startTest(ids, cats) {
+    S.test = { ids, ans: {}, cur: 0, start: Date.now(), cats };
+    save();
+    render();
+    window.scrollTo(0, 0);
+  }
+
+  function renderTest() {
+    const T = S.test;
+    if (T && T.done) return renderTestResult(T);
+    if (T) return renderTestRun(T);
+    renderTestSetup();
+  }
+
+  function renderTestSetup() {
+    const c = cfg();
+    const avail = testPool(c).length;
+    const todayN = dailyCounts()[today()] || 0;
+    const picks = DATA.categories.map((k) => {
+      const on = c.cats.includes(k.id);
+      const n = testPool({ ...c, cats: [k.id] }).length;
+      return `<label class="pick ${on ? "on" : ""}"><input type="checkbox" data-tcat="${k.id}" ${on ? "checked" : ""}><span>${esc(k.name)}</span><span class="count">${n}</span></label>`;
+    }).join("");
+    const hist = (S.tests || []).slice(-8).reverse().map((h) => `<tr>
+        <td>${esc(h.date)}</td><td>${esc(h.cats.map((k) => CAT_NAME[k]).join(", "))}</td>
+        <td class="num">${h.correct}/${h.n}</td><td class="num">${h.n ? Math.round((100 * h.correct) / h.n) : 0}%</td><td class="num">${fmtTime(h.dur)}</td></tr>`).join("");
+    main.innerHTML = `
+      <section class="panel">
+        <h2>Build a test</h2>
+        <p class="muted" style="margin:0 0 12px">Pick the topics you want today. Questions are shuffled and every answer counts toward your daily goal (${todayN}/${S.goal} done today).</p>
+        <div class="pick-grid">${picks}</div>
+        <div class="btn-row"><button class="btn" data-act="tall">Select all</button><button class="btn" data-act="tnone">Clear</button></div>
+        <div class="setup">
+          <label>Number of questions
+            <span class="num-row"><input type="number" id="tN" min="1" max="${QS.length}" value="${c.n}">
+            ${[10, 30, 50, 100].map((n) => `<button class="btn small ${c.n === n ? "primary" : ""}" data-act="tnum" data-n="${n}">${n}</button>`).join("")}</span>
+          </label>
+          <label>Questions from
+            <select id="tFrom">${FROM.map(([v, l]) => `<option value="${v}" ${c.from === v ? "selected" : ""}>${l}</option>`).join("")}</select>
+          </label>
+        </div>
+        ${c.n < S.goal ? `<p class="warn-note">Your daily target is at least ${S.goal}. You can still run a shorter test.</p>` : ""}
+        <p class="muted">${avail} question${avail === 1 ? "" : "s"} available${avail && avail < c.n ? ` (the test will have ${avail})` : ""}.</p>
+        <button class="btn primary big" data-act="tstart" ${avail ? "" : "disabled"}>Start test →</button>
+      </section>
+      ${hist ? `<section class="panel"><h2>Recent tests</h2>
+        <table class="cat-table"><tr><th>Date</th><th>Topics</th><th class="num">Score</th><th class="num">%</th><th class="num">Time</th></tr>${hist}</table></section>` : ""}`;
+  }
+
+  function renderTestRun(T) {
+    const q = BY_ID[T.ids[T.cur]];
+    const answered = Object.keys(T.ans).length;
+    const correct = T.ids.filter((id) => T.ans[id] === BY_ID[id].a).length;
+    const ticks = T.ids.map((id, i) => {
+      const a = T.ans[id];
+      const st = a === undefined ? "" : a === BY_ID[id].a ? "ok" : "bad";
+      return `<button class="tick ${st} ${i === T.cur ? "cur" : ""}" data-tgo="${i}">${i + 1}</button>`;
+    }).join("");
+    main.innerHTML = `
+      <section class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>Test · ${esc(T.cats.map((k) => CAT_NAME[k]).join(", "))}</h2>
+            <div class="muted">${answered}/${T.ids.length} answered · ${correct} correct · ⏱ <span id="tTimer">${fmtTime(testElapsed(T))}</span></div>
+          </div>
+          <div class="btn-row" style="margin:0">
+            <button class="btn" data-act="tquit">Quit</button>
+            <button class="btn primary" data-act="tfinish">Finish test</button>
+          </div>
+        </div>
+        <div class="bar" style="margin-top:10px"><span style="width:${(100 * answered) / T.ids.length}%"></span></div>
+        <div class="checklist">${ticks}</div>
+      </section>
+      ${cardHTML(q, T.cur + 1, { test: true, chosen: T.ans[q.id] })}
+      <div class="test-nav">
+        <button class="btn" data-act="tprev" ${T.cur === 0 ? "disabled" : ""}>← Previous</button>
+        <span class="muted">${T.cur + 1} / ${T.ids.length} · keys 1–4 answer, ← → move</span>
+        ${T.cur < T.ids.length - 1 ? `<button class="btn primary" data-act="tnext">Next →</button>` : `<button class="btn primary" data-act="tfinish">Finish test</button>`}
+      </div>`;
+  }
+
+  function renderTestResult(T) {
+    const n = T.ids.length;
+    const correct = T.ids.filter((id) => T.ans[id] === BY_ID[id].a).length;
+    const wrongIds = T.ids.filter((id) => T.ans[id] !== undefined && T.ans[id] !== BY_ID[id].a);
+    const skipped = T.ids.filter((id) => T.ans[id] === undefined);
+    const rows = T.cats.map((k) => {
+      const ids = T.ids.filter((id) => BY_ID[id].cat === k);
+      if (!ids.length) return "";
+      const ok = ids.filter((id) => T.ans[id] === BY_ID[id].a).length;
+      return `<tr><td>${esc(CAT_NAME[k])}</td><td class="barcell"><div class="bar"><span style="width:${(100 * ok) / ids.length}%"></span></div></td><td class="num">${ok}/${ids.length}</td><td class="num">${Math.round((100 * ok) / ids.length)}%</td></tr>`;
+    }).join("");
+    const review = T.showAll ? T.ids : [...wrongIds, ...skipped];
+    main.innerHTML = `
+      <div class="kpis">
+        <div class="kpi"><div class="v">${correct}/${n}</div><div class="l">Score</div></div>
+        <div class="kpi"><div class="v">${Math.round((100 * correct) / n)}%</div><div class="l">Accuracy</div></div>
+        <div class="kpi"><div class="v">${fmtTime(T.dur)}</div><div class="l">Time (${fmtTime(T.dur / n)} per question)</div></div>
+        <div class="kpi"><div class="v">${wrongIds.length} / ${skipped.length}</div><div class="l">Wrong / skipped</div></div>
+      </div>
+      <section class="panel">
+        <div class="panel-head"><h2>Result by topic</h2>
+          <div class="btn-row" style="margin:0">
+            ${wrongIds.length + skipped.length ? `<button class="btn" data-act="tretake">Retake wrong & skipped (${wrongIds.length + skipped.length})</button>` : ""}
+            <button class="btn primary" data-act="tnew">New test</button>
+          </div>
+        </div>
+        <table class="cat-table">${rows}</table>
+      </section>
+      <div class="panel-head" style="margin:4px 0 10px">
+        <h2 style="font-size:16px;margin:0">${T.showAll ? "All questions" : review.length ? "Review your mistakes" : "Perfect score — nothing to review 🎉"}</h2>
+        <button class="linkish" data-act="tshowall">${T.showAll ? "Show only mistakes" : "Show all questions"}</button>
+      </div>
+      ${review.map((id) => cardHTML(BY_ID[id], T.ids.indexOf(id) + 1, { test: true, chosen: T.ans[id], reveal: true })).join("")}`;
+  }
+
+  function finishTest() {
+    const T = S.test;
+    const left = T.ids.length - Object.keys(T.ans).length;
+    if (left && !confirm(`${left} question${left === 1 ? " is" : "s are"} unanswered. Finish anyway?`)) return;
+    T.done = true;
+    T.dur = Date.now() - T.start;
+    const correct = T.ids.filter((id) => T.ans[id] === BY_ID[id].a).length;
+    (S.tests ||= []).push({ date: today(), cats: T.cats, n: T.ids.length, correct, dur: T.dur });
+    if (S.tests.length > 100) S.tests.shift();
+    save();
+    render();
+    window.scrollTo(0, 0);
+  }
+
+  function testAction(a, el) {
+    const c = cfg();
+    const T = S.test;
+    switch (a) {
+      case "tall": c.cats = DATA.categories.map((k) => k.id); break;
+      case "tnone": c.cats = []; break;
+      case "tnum": c.n = Number(el.dataset.n); break;
+      case "tstart": {
+        const ids = shuffled(testPool(c).map((q) => q.id)).slice(0, c.n);
+        if (ids.length) startTest(ids, [...c.cats]);
+        return;
+      }
+      case "tprev": T.cur = Math.max(0, T.cur - 1); break;
+      case "tnext": T.cur = Math.min(T.ids.length - 1, T.cur + 1); break;
+      case "tfinish": finishTest(); return;
+      case "tquit":
+        if (!confirm("Quit this test? Answers you already gave still count toward today.")) return;
+        S.test = null; break;
+      case "tnew": S.test = null; break;
+      case "tshowall": T.showAll = !T.showAll; break;
+      case "tretake": {
+        const ids = shuffled(T.ids.filter((id) => T.ans[id] !== BY_ID[id].a));
+        startTest(ids, T.cats);
+        return;
+      }
+      default: return;
+    }
+    save();
+    render();
+    if (a === "tprev" || a === "tnext") window.scrollTo(0, 0);
+  }
+
+  function testPick(id, i) {
+    const T = S.test;
+    if (!T || T.done || T.ans[id] !== undefined) return;
+    T.ans[id] = i;
+    const r = rec(id);
+    setRec(id, { a: i, d: r.d || today(), show: undefined }); // also saves S.test
+    const y = window.scrollY;
+    render();
+    window.scrollTo(0, y);
+  }
+
   function render() {
     renderHeader();
     renderCats();
-    if (S.mode === "browse") renderBrowse();
+    $("#cats").hidden = S.mode === "test";
+    if (S.mode === "test") renderTest();
+    else if (S.mode === "browse") renderBrowse();
     else if (S.mode === "progress") renderProgress();
     else renderToday();
   }
@@ -357,9 +562,14 @@
     const jump = e.target.closest("[data-jump]");
     if (jump) { document.getElementById("q-" + jump.dataset.jump)?.scrollIntoView({ behavior: "smooth", block: "start" }); return; }
 
+    const tgo = e.target.closest("[data-tgo]");
+    if (tgo && S.test) { S.test.cur = Number(tgo.dataset.tgo); save(); render(); return; }
+
     const act = e.target.closest("[data-act]");
     if (!act) return;
     const a = act.dataset.act;
+    if (a.startsWith("t") && a !== "tick") { testAction(a, act); return; }
+    if (a === "pick" && act.closest("[data-test]")) { testPick(act.closest(".card").dataset.id, Number(act.dataset.i)); return; }
     if (a === "more") { extendSet(S.cat, 10); render(); return; }
     if (a === "showmore") { browseState.shown += PAGE; renderBrowse(); return; }
 
@@ -382,6 +592,16 @@
   });
 
   main.addEventListener("change", (e) => {
+    const tcat = e.target.dataset.tcat;
+    if (tcat) {
+      const c = cfg();
+      c.cats = e.target.checked ? [...new Set([...c.cats, tcat])] : c.cats.filter((k) => k !== tcat);
+      // Keep the category order stable.
+      c.cats = DATA.categories.map((k) => k.id).filter((k) => c.cats.includes(k));
+      save(); renderTest(); return;
+    }
+    if (e.target.id === "tN") { cfg().n = Math.max(1, Math.min(QS.length, parseInt(e.target.value, 10) || 30)); save(); renderTest(); return; }
+    if (e.target.id === "tFrom") { cfg().from = e.target.value; save(); renderTest(); return; }
     if (e.target.id === "fStatus") { browseState.status = e.target.value; browseState.shown = PAGE; renderBrowse(); }
     if (e.target.id === "fTopic") { browseState.topic = e.target.value; browseState.shown = PAGE; renderBrowse(); }
   });
@@ -446,9 +666,25 @@
     setTimeout(() => t.remove(), 2200);
   }
 
-  // Roll over to a new day if the tab stays open past midnight.
+  // Keyboard shortcuts while a test is running.
+  document.addEventListener("keydown", (e) => {
+    const T = S.test;
+    if (S.mode !== "test" || !T || T.done || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (["INPUT", "SELECT", "TEXTAREA"].includes(e.target.tagName) || document.querySelector("dialog[open]")) return;
+    const k = e.key.toLowerCase();
+    const idx = "1234".indexOf(k) >= 0 ? "1234".indexOf(k) : "abcd".indexOf(k);
+    if (idx >= 0) { testPick(T.ids[T.cur], idx); e.preventDefault(); }
+    else if (k === "arrowright" || k === "enter") { if (T.cur < T.ids.length - 1) testAction("tnext"); e.preventDefault(); }
+    else if (k === "arrowleft") { testAction("tprev"); e.preventDefault(); }
+  });
+
+  // Roll over to a new day if the tab stays open past midnight; tick the test timer.
   let lastDay = today();
   setInterval(() => { if (today() !== lastDay) { lastDay = today(); render(); } }, 60000);
+  setInterval(() => {
+    const el = document.getElementById("tTimer");
+    if (el && S.test && !S.test.done) el.textContent = fmtTime(testElapsed(S.test));
+  }, 1000);
 
   render();
 })();
