@@ -171,6 +171,7 @@
         <span class="chip">${esc(CAT_NAME[q.cat])}</span>
         <span>${esc(q.topic)}</span>
         ${q.lvl ? `<span class="lvl">${esc(q.lvl)}</span>` : ""}
+        ${q.t ? `<span class="lvl" title="Expected time at OA pace">⏱ ~${q.t} s</span>` : ""}
         <span class="spacer"></span>
         <span class="muted">${esc(q.src)}</span>
         <button class="star ${r.b ? "on" : ""}" data-act="star" title="Bookmark" aria-label="Bookmark">${r.b ? "★" : "☆"}</button>
@@ -332,7 +333,18 @@
 
   // ----------------------------------------------------------------- test
   const FROM = [["new", "Not done yet"], ["any", "Any question"], ["wrong", "My wrong answers"], ["star", "Bookmarked"]];
-  const cfg = () => (S.testCfg ||= { cats: ["aptitude", "stats"], n: 30, from: "new" });
+  const cfg = () => {
+    const c = (S.testCfg ||= { cats: ["aptitude", "stats"], n: 30, from: "new" });
+    c.time ||= "auto"; // auto = expected time, custom = c.mins, none = no limit
+    c.mins ||= 30;
+    return c;
+  };
+  const expectedMs = (ids) => ids.reduce((s, id) => s + (BY_ID[id].t || 45), 0) * 1000;
+  function limitFor(c, ids) {
+    if (c.time === "none") return null;
+    if (c.time === "custom") return c.mins * 60000;
+    return expectedMs(ids);
+  }
 
   function testPool(c) {
     const cats = new Set(c.cats);
@@ -357,8 +369,8 @@
   };
   const testElapsed = (T) => (T.dur !== undefined ? T.dur : Date.now() - T.start);
 
-  function startTest(ids, cats) {
-    S.test = { ids, ans: {}, cur: 0, start: Date.now(), cats };
+  function startTest(ids, cats, limit) {
+    S.test = { ids, ans: {}, cur: 0, start: Date.now(), cats, limit, expected: expectedMs(ids) };
     save();
     render();
     window.scrollTo(0, 0);
@@ -373,8 +385,12 @@
 
   function renderTestSetup() {
     const c = cfg();
-    const avail = testPool(c).length;
+    const poolQs = testPool(c);
+    const avail = poolQs.length;
     const todayN = dailyCounts()[today()] || 0;
+    const count = Math.min(c.n, avail);
+    const avgSec = avail ? poolQs.reduce((s, q) => s + (q.t || 45), 0) / avail : 45;
+    const expMin = Math.max(1, Math.round((avgSec * count) / 60));
     const picks = DATA.categories.map((k) => {
       const on = c.cats.includes(k.id);
       const n = testPool({ ...c, cats: [k.id] }).length;
@@ -382,7 +398,8 @@
     }).join("");
     const hist = (S.tests || []).slice(-8).reverse().map((h) => `<tr>
         <td>${esc(h.date)}</td><td>${esc(h.cats.map((k) => CAT_NAME[k]).join(", "))}</td>
-        <td class="num">${h.correct}/${h.n}</td><td class="num">${h.n ? Math.round((100 * h.correct) / h.n) : 0}%</td><td class="num">${fmtTime(h.dur)}</td></tr>`).join("");
+        <td class="num">${h.correct}/${h.n}</td><td class="num">${h.n ? Math.round((100 * h.correct) / h.n) : 0}%</td>
+        <td class="num">${fmtTime(h.dur)}${h.limit ? ` / ${fmtTime(h.limit)}` : ""}</td></tr>`).join("");
     main.innerHTML = `
       <section class="panel">
         <h2>Build a test</h2>
@@ -397,14 +414,36 @@
           <label>Questions from
             <select id="tFrom">${FROM.map(([v, l]) => `<option value="${v}" ${c.from === v ? "selected" : ""}>${l}</option>`).join("")}</select>
           </label>
+          <label>Time limit
+            <span class="num-row">
+              <select id="tTime">
+                <option value="auto" ${c.time === "auto" ? "selected" : ""}>Expected time (≈${expMin} min)</option>
+                <option value="custom" ${c.time === "custom" ? "selected" : ""}>Set my own</option>
+                <option value="none" ${c.time === "none" ? "selected" : ""}>No limit</option>
+              </select>
+              ${c.time === "custom" ? `<input type="number" id="tMins" min="1" max="600" value="${c.mins}"> min
+                ${[15, 30, 45, 60].map((m) => `<button class="btn small ${c.mins === m ? "primary" : ""}" data-act="tmins" data-m="${m}">${m}</button>`).join("")}` : ""}
+            </span>
+          </label>
         </div>
+        <p class="muted" style="font-size:13px;margin:4px 0 0">Expected time for ${count} question${count === 1 ? "" : "s"}: <b>≈${expMin} min</b> (about ${Math.round(avgSec)} s each at OA pace).
+          ${c.time === "custom" && c.mins < expMin ? `<span class="warn-note">Your limit is tighter than expected — good practice for speed.</span>` : ""}
+          The test submits itself when time runs out.</p>
         ${c.n < S.goal ? `<p class="warn-note">Your daily target is at least ${S.goal}. You can still run a shorter test.</p>` : ""}
         <p class="muted">${avail} question${avail === 1 ? "" : "s"} available${avail && avail < c.n ? ` (the test will have ${avail})` : ""}.</p>
         <button class="btn primary big" data-act="tstart" ${avail ? "" : "disabled"}>Start test →</button>
       </section>
       ${hist ? `<section class="panel"><h2>Recent tests</h2>
-        <table class="cat-table"><tr><th>Date</th><th>Topics</th><th class="num">Score</th><th class="num">%</th><th class="num">Time</th></tr>${hist}</table></section>` : ""}`;
+        <table class="cat-table"><tr><th>Date</th><th>Topics</th><th class="num">Score</th><th class="num">%</th><th class="num">Time / limit</th></tr>${hist}</table></section>` : ""}`;
   }
+
+  function timerText(T) {
+    const el = testElapsed(T);
+    if (!T.limit) return `⏱ ${fmtTime(el)}`;
+    const left = Math.max(0, T.limit - el);
+    return `⏱ ${fmtTime(left)} left of ${fmtTime(T.limit)}`;
+  }
+  const timerLow = (T) => T.limit && T.limit - testElapsed(T) < 60000;
 
   function renderTestRun(T) {
     const q = BY_ID[T.ids[T.cur]];
@@ -420,7 +459,7 @@
         <div class="panel-head">
           <div>
             <h2>Test · ${esc(T.cats.map((k) => CAT_NAME[k]).join(", "))}</h2>
-            <div class="muted">${answered}/${T.ids.length} answered · ${correct} correct · ⏱ <span id="tTimer">${fmtTime(testElapsed(T))}</span></div>
+            <div class="muted">${answered}/${T.ids.length} answered · ${correct} correct · <span id="tTimer" class="timer ${timerLow(T) ? "low" : ""}">${timerText(T)}</span></div>
           </div>
           <div class="btn-row" style="margin:0">
             <button class="btn" data-act="tquit">Quit</button>
@@ -451,10 +490,13 @@
     }).join("");
     const review = T.showAll ? T.ids : [...wrongIds, ...skipped];
     main.innerHTML = `
+      ${T.timeUp ? `<div class="panel timeup">⏰ Time's up — the test was submitted automatically. Unanswered questions count as skipped.</div>` : ""}`;
+    main.innerHTML += `
       <div class="kpis">
         <div class="kpi"><div class="v">${correct}/${n}</div><div class="l">Score</div></div>
         <div class="kpi"><div class="v">${Math.round((100 * correct) / n)}%</div><div class="l">Accuracy</div></div>
-        <div class="kpi"><div class="v">${fmtTime(T.dur)}</div><div class="l">Time (${fmtTime(T.dur / n)} per question)</div></div>
+        <div class="kpi"><div class="v">${fmtTime(T.dur)}</div><div class="l">Time used${T.limit ? ` of ${fmtTime(T.limit)} limit` : ""} · ${fmtTime(T.dur / n)} per question</div></div>
+        <div class="kpi"><div class="v">${fmtTime(T.expected || expectedMs(T.ids))}</div><div class="l">Expected time · ${T.timeUp ? "ran out of time" : T.dur <= (T.expected || expectedMs(T.ids)) ? "you were on pace ✓" : "slower than OA pace"}</div></div>
         <div class="kpi"><div class="v">${wrongIds.length} / ${skipped.length}</div><div class="l">Wrong / skipped</div></div>
       </div>
       <section class="panel">
@@ -473,14 +515,15 @@
       ${review.map((id) => cardHTML(BY_ID[id], T.ids.indexOf(id) + 1, { test: true, chosen: T.ans[id], reveal: true })).join("")}`;
   }
 
-  function finishTest() {
+  function finishTest(timeUp = false) {
     const T = S.test;
     const left = T.ids.length - Object.keys(T.ans).length;
-    if (left && !confirm(`${left} question${left === 1 ? " is" : "s are"} unanswered. Finish anyway?`)) return;
+    if (!timeUp && left && !confirm(`${left} question${left === 1 ? " is" : "s are"} unanswered. Finish anyway?`)) return;
     T.done = true;
-    T.dur = Date.now() - T.start;
+    T.timeUp = timeUp;
+    T.dur = timeUp ? T.limit : Date.now() - T.start;
     const correct = T.ids.filter((id) => T.ans[id] === BY_ID[id].a).length;
-    (S.tests ||= []).push({ date: today(), cats: T.cats, n: T.ids.length, correct, dur: T.dur });
+    (S.tests ||= []).push({ date: today(), cats: T.cats, n: T.ids.length, correct, dur: T.dur, limit: T.limit || null });
     if (S.tests.length > 100) S.tests.shift();
     save();
     render();
@@ -494,9 +537,10 @@
       case "tall": c.cats = DATA.categories.map((k) => k.id); break;
       case "tnone": c.cats = []; break;
       case "tnum": c.n = Number(el.dataset.n); break;
+      case "tmins": c.mins = Number(el.dataset.m); break;
       case "tstart": {
         const ids = shuffled(testPool(c).map((q) => q.id)).slice(0, c.n);
-        if (ids.length) startTest(ids, [...c.cats]);
+        if (ids.length) startTest(ids, [...c.cats], limitFor(c, ids));
         return;
       }
       case "tprev": T.cur = Math.max(0, T.cur - 1); break;
@@ -509,7 +553,7 @@
       case "tshowall": T.showAll = !T.showAll; break;
       case "tretake": {
         const ids = shuffled(T.ids.filter((id) => T.ans[id] !== BY_ID[id].a));
-        startTest(ids, T.cats);
+        startTest(ids, T.cats, limitFor(c, ids));
         return;
       }
       default: return;
@@ -602,6 +646,8 @@
     }
     if (e.target.id === "tN") { cfg().n = Math.max(1, Math.min(QS.length, parseInt(e.target.value, 10) || 30)); save(); renderTest(); return; }
     if (e.target.id === "tFrom") { cfg().from = e.target.value; save(); renderTest(); return; }
+    if (e.target.id === "tTime") { cfg().time = e.target.value; save(); renderTest(); return; }
+    if (e.target.id === "tMins") { cfg().mins = Math.max(1, Math.min(600, parseInt(e.target.value, 10) || 30)); save(); renderTest(); return; }
     if (e.target.id === "fStatus") { browseState.status = e.target.value; browseState.shown = PAGE; renderBrowse(); }
     if (e.target.id === "fTopic") { browseState.topic = e.target.value; browseState.shown = PAGE; renderBrowse(); }
   });
@@ -681,10 +727,19 @@
   // Roll over to a new day if the tab stays open past midnight; tick the test timer.
   let lastDay = today();
   setInterval(() => { if (today() !== lastDay) { lastDay = today(); render(); } }, 60000);
-  setInterval(() => {
+  function tickTimer() {
+    const T = S.test;
+    if (!T || T.done) return;
+    if (T.limit && testElapsed(T) >= T.limit) {
+      finishTest(true);
+      if (S.mode !== "test") toast("Time's up — your test was submitted");
+      return;
+    }
     const el = document.getElementById("tTimer");
-    if (el && S.test && !S.test.done) el.textContent = fmtTime(testElapsed(S.test));
-  }, 1000);
+    if (el) { el.textContent = timerText(T); el.classList.toggle("low", !!timerLow(T)); }
+  }
+  setInterval(tickTimer, 1000);
+  tickTimer(); // a test whose time ran out while the page was closed
 
   render();
 })();
